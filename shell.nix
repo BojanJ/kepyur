@@ -1,7 +1,12 @@
 # kepyur build environment: everything the desktop harness and the Android app need.
 #   nix-shell            # then: scripts/build-desktop.sh, scripts/build-android.sh
 let
-  pkgs = import <nixpkgs> {
+  # pinned (the same nixpkgs as the dev machine, NixOS 25.11.20260408) so CI builds with the same toolchain
+  nixpkgs = fetchTarball {
+    url = "https://github.com/NixOS/nixpkgs/archive/b5d476ea3060e8e5a804609137458c695a90fc0e.tar.gz";
+    sha256 = "0bcj93n4sxr8sfd72g7fkxkw2yvi94022341vlampwyjvrlb9zpv";
+  };
+  pkgs = import nixpkgs {
     config.allowUnfree = true;
     config.android_sdk.accept_license = true;
   };

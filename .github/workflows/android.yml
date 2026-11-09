@@ -1,0 +1,58 @@
+# Build the debug APK on every push to main and publish it as the rolling "main" pre-release
+# (tag main-latest, replaced each time). No versioned releases yet.
+name: android
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: main-apk
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # devourer only: its own submodules are vendor driver trees the build does not use
+      - name: Submodules
+        run: |
+          git submodule update --init third_party/libusb third_party/wifi-sdr
+          git -C third_party/wifi-sdr submodule update --init external/devourer
+
+      - uses: cachix/install-nix-action@v31
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('android/**/*.kts', 'android/gradle.properties') }}
+          restore-keys: gradle-
+
+      # the toolchain (Android SDK/NDK, JDK, Gradle, CMake, mipsel binutils) comes from shell.nix
+      - name: Build
+        run: nix-shell --run scripts/build-android.sh
+
+      - name: Publish the main release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp android/app/build/outputs/apk/debug/app-debug.apk kepyur-main.apk
+          short=$(git rev-parse --short HEAD)
+          {
+            echo "Debug APK built from \`main\` at ${short}:"
+            echo
+            git log -1 --format='%s'
+            echo
+            echo "Rolling build, replaced on every push to main. Install: \`adb install -r kepyur-main.apk\`."
+          } > notes.md
+          gh release delete main-latest --yes --cleanup-tag || true
+          gh release create main-latest kepyur-main.apk --prerelease --target "$GITHUB_SHA" \
+            --title "main (${short})" --notes-file notes.md

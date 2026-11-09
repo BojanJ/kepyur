@@ -1,7 +1,7 @@
 [submodule "third_party/wifi-sdr"]
 	path = third_party/wifi-sdr
 	url = https://github.com/gilankpam/wifi-sdr.git
-	branch = tplink-t4u
+	branch = kepyur-android
 [submodule "third_party/libusb"]
 	path = third_party/libusb
 	url = https://github.com/libusb/libusb.git

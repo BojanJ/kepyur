@@ -6,7 +6,11 @@ streams 40 MS/s raw IQ through [wifi-sdr](https://github.com/snokvist/wifi-sdr) 
 scans the 5.8 GHz bands for analog video, lists the pilots, and decodes the picked one in colour (NTSC and PAL; grey when the colour burst is too weak).
 Design: [docs/superpowers/specs/2026-11-09-kepyur-design.md](docs/superpowers/specs/2026-11-09-kepyur-design.md).
 
-Status: first build, not yet run on a phone. Target: vivo X200 Pro.
+Status: running on the target phone (vivo X200 Pro): scan finds the pilot, colour video at 60 fps.
+
+The latest APK from `main` is the rolling **main** pre-release (tag `main-latest`), rebuilt by CI
+(`.github/workflows/android.yml`) on every push to `main`. It is a debug build signed with CI's key: if a
+locally built kepyur is installed, uninstall it first (`adb uninstall com.kepyur.app`).
 
 ## Layout
 
@@ -22,6 +26,7 @@ Status: first build, not yet run on a phone. Target: vivo X200 Pro.
 Everything comes from `shell.nix`:
 
 ```sh
+git clone https://github.com/gilankpam/kepyur && cd kepyur
 git submodule update --init third_party/libusb third_party/wifi-sdr
 git -C third_party/wifi-sdr submodule update --init external/devourer
 nix-shell
