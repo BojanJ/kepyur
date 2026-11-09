@@ -88,7 +88,7 @@ std::vector<Hump> find_humps(const std::vector<float> &db, double fs, double edg
     while (j < n && sm[j] > thr) j++;
     const double f0 = (i - n / 2) * bin, f1 = (j - 1 - n / 2) * bin;
     const double width = f1 - f0 + bin;
-    if (width >= 3.5e6 && width <= 16e6 && f0 > -edge_hz && f1 < edge_hz) {
+    if (width >= 3.5e6 && width <= 24e6 && f0 > -edge_hz && f1 < edge_hz) {  // a VTX next to the phone: ~16 MHz
       double sw = 0, sf = 0;
       float pk = -1e9f;
       for (int k = i; k < j; k++) {

@@ -60,7 +60,9 @@ int main(int argc, char **argv) {
       double r = json_number(txt, ext == ".sigmf-data" ? "core:sample_rate" : "sample_rate");
       if (!std::isnan(r)) fs = r;
       if (ext == ".sigmf-data") centre = json_number(txt, "core:frequency");
-      else {
+      else if (!std::isnan(json_number(txt, "centre_hz"))) {
+        centre = json_number(txt, "centre_hz");  // kepyur's own recordings
+      } else {
         const double ch = json_number(txt, "channel") + (fs >= 40e6 ? 2 : 0);  // primary -> centre at BW40
         centre = (5000 + 5 * ch) * 1e6;
       }

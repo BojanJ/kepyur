@@ -29,7 +29,7 @@ private:
 
 void fft_inplace(cf *x, int n);  // radix-2, n a power of two, forward
 
-// A hump in the spectrum that looks like an FM video carrier (4..14 MHz wide, well above the floor).
+// A hump in the spectrum that looks like an FM video carrier (3.5..24 MHz wide at floor + 6 dB).
 struct Hump {
   double offset_hz;  // centroid, relative to the stream centre
   double width_hz;

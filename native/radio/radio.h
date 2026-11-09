@@ -50,6 +50,12 @@ public:
   void watch(double hz);
   void stream_test(int rate_sel, double seconds);
   void idle();
+  // Debug: the rate watch uses (1 = 40 MS/s, the default; 2 = 20 MS/s); takes effect on the next watch().
+  void set_watch_rate(int rate_sel);
+  // Debug: gain for the next tune: < 0 = the chip's AGC, else fixed gain in dB (CCA off, IGI pinned).
+  void set_gain(double db);
+  // Debug: save the next `seconds` of watched IQ as PREFIX.cs16 + PREFIX.json (kp_replay reads them).
+  void record(double seconds, const std::string &prefix);
 
   std::string status_json();   // for the UI (polled)
   std::vector<Pilot> pilots();
@@ -67,6 +73,7 @@ private:
   void on_bank(const uint8_t *b, size_t n, uint64_t seq, uint32_t gen, double fs, double centre, double shift);
   void tune(double hz, int rate_sel);
   void handle_watch(Bank &b);
+  void record_bank(const Bank &b);
   void handle_scan(Bank &b);
   void handle_test(Bank &b);
   void scan_step_done();
@@ -79,6 +86,15 @@ private:
   uint64_t _mode_epoch = 0;  // bumped on every mode change; the DSP thread restarts its state
   double _watch_hz = 0, _req_hz = 0;
   int _req_rate = 1;
+  int _watch_rate = 1;
+  double _gain_db = -1;
+  // recording (DSP thread writes; the request is under _m)
+  double _rec_req_s = 0;
+  std::string _rec_req_prefix;
+  FILE *_rec = nullptr;
+  std::string _rec_prefix;
+  uint64_t _rec_left = 0, _rec_samples = 0;
+  double _rec_fs = 0, _rec_centre = 0, _rec_shift = 0;
   std::vector<Pilot> _pilots;
   bool _superspeed = false, _open = false;
   std::string _chip;

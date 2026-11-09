@@ -179,6 +179,20 @@ JNIEXPORT void JNICALL Java_com_kepyur_app_Native_streamTest(JNIEnv *, jclass, j
   if (g_radio && g_radio->is_open()) g_radio->stream_test(rate_sel, seconds);
 }
 
+JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setWatchRate(JNIEnv *, jclass, jint rate_sel) {
+  if (g_radio) g_radio->set_watch_rate(rate_sel);
+}
+
+JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setGain(JNIEnv *, jclass, jdouble db) {
+  if (g_radio) g_radio->set_gain(db);
+}
+
+JNIEXPORT void JNICALL Java_com_kepyur_app_Native_record(JNIEnv *env, jclass, jdouble seconds, jstring prefix) {
+  const char *p = env->GetStringUTFChars(prefix, nullptr);
+  if (g_radio) g_radio->record(seconds, p);
+  env->ReleaseStringUTFChars(prefix, p);
+}
+
 JNIEXPORT jstring JNICALL Java_com_kepyur_app_Native_status(JNIEnv *env, jclass) {
   const std::string s = g_radio ? g_radio->status_json() : std::string("{\"open\":false}");
   return env->NewStringUTF(s.c_str());

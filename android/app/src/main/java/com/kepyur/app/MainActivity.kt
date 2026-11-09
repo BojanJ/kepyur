@@ -97,12 +97,35 @@ class MainActivity : Activity() {
         }
         ui.post(poll)
         connect()
+        intent?.let { debugExtras(it) }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         intent.getStringExtra("mode")?.let { mode = it }
         if (intent.action == UsbManager.ACTION_USB_DEVICE_ATTACHED) connect()
+        debugExtras(intent)
+    }
+
+    /** adb shell am start -n com.kepyur.app/.MainActivity --ei watchrate 1|2 --ef gain 30 --ef record 3 */
+    private fun debugExtras(i: Intent) {
+        if (i.hasExtra("gain")) {
+            val g = i.getFloatExtra("gain", -1f).toDouble()
+            Native.setGain(g)
+            Native.log("debug: gain ${if (g < 0) "AGC" else "$g dB"}")
+            if (watchingHz > 0 && state == State.RUNNING && !i.hasExtra("watchrate")) Native.watch(watchingHz)
+        }
+        if (i.hasExtra("watchrate")) {
+            val r = i.getIntExtra("watchrate", 2)
+            Native.setWatchRate(r)
+            Native.log("debug: watch rate_sel $r")
+            if (watchingHz > 0 && state == State.RUNNING) Native.watch(watchingHz)
+        }
+        if (i.hasExtra("record")) {
+            val secs = i.getFloatExtra("record", 3f).toDouble()
+            val name = "rec-" + java.text.SimpleDateFormat("HHmmss", java.util.Locale.US).format(java.util.Date())
+            Native.record(secs, getExternalFilesDir(null)!!.absolutePath + "/" + name)
+        }
     }
 
     override fun onResume() {
@@ -467,8 +490,19 @@ class MainActivity : Activity() {
         tv("%.0f MHz".format(mhz), 15f, Color.rgb(220, 220, 220), 86f)
         tv(p.optString("std"), 12f, Color.rgb(170, 170, 170), 0f)
         if (age > 15 && !selected) tv("${age}s ago", 11f, Color.rgb(140, 140, 140), 56f)
-        tv("▮".repeat(bars) + "▯".repeat(4 - bars), 14f, Color.rgb(76, 175, 80), 52f)
+        row.addView(signalBars(bars), LinearLayout.LayoutParams(dpi(30f), dpi(20f)))
         return row
+    }
+
+    /** Four rising bars, [n] of them lit. */
+    private fun signalBars(n: Int): View {
+        val box = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.BOTTOM }
+        for (i in 0 until 4) {
+            box.addView(View(this).apply {
+                setBackgroundColor(if (i < n) Color.rgb(76, 175, 80) else Color.rgb(58, 63, 69))
+            }, LinearLayout.LayoutParams(dpi(5f), dpi(5f + 5f * i)).apply { marginEnd = dpi(2.5f) })
+        }
+        return box
     }
 
     private fun rounded(color: Int, r: Float) = GradientDrawable().apply { setColor(color); cornerRadius = dp(r) }

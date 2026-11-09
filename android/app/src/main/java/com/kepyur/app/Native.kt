@@ -16,6 +16,12 @@ object Native {
     @JvmStatic external fun scan()
     @JvmStatic external fun watch(hz: Double)
     @JvmStatic external fun streamTest(rateSel: Int, seconds: Double)
+    /** Debug: the rate watch uses (2 = 20 MS/s, 1 = 40 MS/s), from the next watch on. */
+    @JvmStatic external fun setWatchRate(rateSel: Int)
+    /** Debug: gain from the next tune on: < 0 = the chip's AGC, else fixed gain (dB). */
+    @JvmStatic external fun setGain(db: Double)
+    /** Debug: save the next [seconds] of watched IQ as [prefix].cs16 + .json. */
+    @JvmStatic external fun record(seconds: Double, prefix: String)
     @JvmStatic external fun status(): String
     @JvmStatic external fun setSurface(surface: Surface?)
     @JvmStatic external fun log(msg: String)

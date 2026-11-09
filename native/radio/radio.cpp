@@ -160,7 +160,11 @@ void Radio::tune(double hz, int rate_sel) {
   s.freq = hz;
   s.rate_sel = rate_sel;
   s.wide = true;
-  s.agc = true;
+  {
+    std::lock_guard<std::mutex> l(_m);
+    s.agc = _gain_db < 0;
+    if (_gain_db >= 0) s.gain_db = _gain_db;
+  }
   _rx->set(s);
   std::lock_guard<std::mutex> l(_m);
   _req_hz = hz;
@@ -193,6 +197,22 @@ void Radio::idle() {
   std::lock_guard<std::mutex> l(_m);
   _mode = Mode::Idle;
   _mode_epoch++;
+}
+
+void Radio::set_watch_rate(int rate_sel) {
+  std::lock_guard<std::mutex> l(_m);
+  _watch_rate = rate_sel;
+}
+
+void Radio::set_gain(double db) {
+  std::lock_guard<std::mutex> l(_m);
+  _gain_db = db;
+}
+
+void Radio::record(double seconds, const std::string &prefix) {
+  std::lock_guard<std::mutex> l(_m);
+  _rec_req_s = seconds;
+  _rec_req_prefix = prefix;
 }
 
 std::vector<Pilot> Radio::pilots() {
@@ -249,11 +269,16 @@ void Radio::dsp_loop() {
           std::lock_guard<std::mutex> l(_m);
           hz = _watch_hz;
         }
-        // Watch at 20 MS/s (20 MHz channel, ~18.4 MHz filter): the video fits (measured: same lock and colour
-        // as 40 MS/s on the spike's R4 recording and the 10 MHz-deviation PAL simulation), and on the X200 Pro
-        // 40 MS/s plus the decoder missed the chip's bank deadline every 1-2 s (185 us budget, 20 MS/s: 2x slack).
-        KP_LOGI("radio: watch %.3f MHz at 20 MS/s", hz / 1e6);
-        tune(hz, 2);
+        // Watch at 40 MS/s with the chip's AGC. At 20 MS/s (20 MHz channel) the X200 Pro's adapter streams
+        // runs of 120 frozen samples (~3900/s with AGC: grey streaks with a coloured tail); fixed gain avoids
+        // them only below saturation. 40 MS/s: none, and 60 s with colour decoding: 0 bank-deadline restarts.
+        KP_LOGI("radio: watch %.3f MHz", hz / 1e6);
+        int rate;
+        {
+          std::lock_guard<std::mutex> l(_m);
+          rate = _watch_rate;
+        }
+        tune(hz, rate);
       } else if (mode == Mode::Scan) {
         _plan = scan_plan();
         _step = 0;
@@ -325,6 +350,7 @@ void Radio::handle_watch(Bank &b) {
   }
   _fe_gen = b.gen;
   unpack(b, _iq);
+  record_bank(b);
   std::vector<float> d;
   {
     std::lock_guard<std::mutex> l(_dqm);
@@ -344,6 +370,53 @@ void Radio::handle_watch(Bank &b) {
     _dq.push_back(DBlock{_fe, std::move(d)});
   }
   _dqcv.notify_one();
+}
+
+// Debug recording: the watched IQ as int16 (LA value << 4, as wsdr_probe writes .cs16), whole banks.
+void Radio::record_bank(const Bank &b) {
+  if (!_rec) {
+    double secs;
+    std::string prefix;
+    {
+      std::lock_guard<std::mutex> l(_m);
+      secs = _rec_req_s;
+      prefix = _rec_req_prefix;
+      _rec_req_s = 0;
+    }
+    if (secs <= 0) return;
+    _rec = std::fopen((prefix + ".cs16").c_str(), "wb");
+    if (!_rec) {
+      KP_LOGE("record: cannot open %s.cs16", prefix.c_str());
+      return;
+    }
+    std::setvbuf(_rec, nullptr, _IOFBF, 1 << 20);
+    _rec_prefix = prefix;
+    _rec_left = static_cast<uint64_t>(secs * b.fs);
+    _rec_samples = 0;
+    _rec_fs = b.fs;
+    _rec_centre = b.centre_hz;
+    _rec_shift = b.shift_hz;
+    KP_LOGI("record: %.1f s at %.0f MS/s -> %s.cs16", secs, b.fs / 1e6, prefix.c_str());
+  }
+  const size_t ns = std::min<uint64_t>(_iq.size(), _rec_left);
+  std::vector<int16_t> buf(2 * ns);
+  for (size_t i = 0; i < ns; i++) {
+    buf[2 * i] = static_cast<int16_t>(static_cast<int>(_iq[i].real()) * 16);
+    buf[2 * i + 1] = static_cast<int16_t>(static_cast<int>(_iq[i].imag()) * 16);
+  }
+  std::fwrite(buf.data(), 4, ns, _rec);
+  _rec_left -= ns;
+  _rec_samples += ns;
+  if (_rec_left == 0) {
+    std::fclose(_rec);
+    _rec = nullptr;
+    if (FILE *j = std::fopen((_rec_prefix + ".json").c_str(), "w")) {
+      std::fprintf(j, "{\"format\":\"cs16\",\"sample_rate\":%.0f,\"centre_hz\":%.0f,\"shift_hz\":%.0f,\"samples\":%llu,"
+                   "\"source\":\"kepyur watch\"}\n", _rec_fs, _rec_centre, _rec_shift, (unsigned long long)_rec_samples);
+      std::fclose(j);
+    }
+    KP_LOGI("record: done, %llu samples -> %s.cs16", (unsigned long long)_rec_samples, _rec_prefix.c_str());
+  }
 }
 
 void Radio::decode_loop() {
