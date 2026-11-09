@@ -4,7 +4,6 @@ Android analog FPV receiver for spectating. A TP-Link Archer T4U v3 (RTL8812BU) 
 streams 40 MS/s raw IQ through [wifi-sdr](https://github.com/snokvist/wifi-sdr) (fork:
 `gilankpam/wifi-sdr`, branch `kepyur-android`) and [devourer](https://github.com/OpenIPC/devourer); kepyur
 scans the 5.8 GHz bands for analog video, lists the pilots, and decodes the picked one in colour (NTSC and PAL; grey when the colour burst is too weak).
-Design: [docs/superpowers/specs/2026-11-09-kepyur-design.md](docs/superpowers/specs/2026-11-09-kepyur-design.md).
 
 Status: running on the target phone (vivo X200 Pro): scan finds the pilot, colour video at 60 fps.
 
