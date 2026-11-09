@@ -1,0 +1,81 @@
+// kepyur: analog FPV video decoder (FM composite -> 8-bit grey frames). Shared by the app and the desktop
+// tools. Grown from vtx-spike/viewer/vtxview.cpp.
+//
+//   FrontEnd fe(fs_in, shift_hz, on_frame);   // fs_in 40e6 (halfband to 20 MS/s) or 20e6
+//   for (each IQ sample) fe.feed(x);
+//
+// Single-threaded: feed() and every callback run on the caller's thread.
+#pragma once
+#include <complex>
+#include <cstdint>
+#include <functional>
+#include <vector>
+
+namespace kp {
+
+using cf = std::complex<float>;
+
+struct VideoStd {
+  double T_us;   // line period
+  double a0_us;  // active video start after the hsync leading edge
+  double aw_us;  // active video width
+  int active;    // active lines per field
+  int skip;      // lines from the field's first broad pulse to the first active line
+  const char *name;
+};
+extern const VideoStd kNtsc, kPal;
+
+// A finished picture. Valid only during the callback.
+struct Frame {
+  const uint8_t *data;
+  int width, height;  // 720 x 480 (NTSC) / 720 x 576 (PAL)
+  const VideoStd *std;
+};
+using FrameSink = std::function<void(const Frame &)>;
+
+struct DecoderStats {
+  bool acquiring = true;
+  float sign = 1, tip = 0, blank = 0;     // levels in MHz of discriminator output
+  uint64_t lines = 0, lines_locked = 0;   // since the last acquisition
+  uint64_t fields = 0, frames = 0;        // since construction
+  uint64_t acquisitions = 0, losses = 0;  // successful acquisitions, lock losses
+  double line_us = 0;                     // tracked line period
+  float lock_recent = 0;                  // locked fraction over the last ~2 fields
+  const char *std_name = "?";
+};
+
+struct DecoderOpts {
+  int width = 720;
+  bool fields = true;          // true: every field, line-doubled (60/50 Hz, no combing); false: woven frames
+  int std_force = 0;           // 0 auto, 1 NTSC, 2 PAL
+  bool force_invert = false;   // only try sync at the high-frequency end
+};
+
+class Decoder;
+
+// IQ (at fs_in) -> DC removal -> NCO -> [halfband /2 when fs_in >= 40e6] -> FM discriminator -> Decoder.
+class FrontEnd {
+public:
+  FrontEnd(double fs_in, double shift_hz, FrameSink sink, const DecoderOpts &o = {});
+  ~FrontEnd();
+  void set_shift(double shift_hz);  // carrier offset from the stream centre (Hz) to bring to 0
+  double shift() const { return _shift; }
+  void feed(const cf *x, size_t n);
+  DecoderStats stats() const;
+  double fs_demod() const { return _fs_out; }
+
+private:
+  double _fs_in, _fs_out, _shift = 0;
+  bool _decimate;
+  // halfband state (23 taps; history kept twice so the taps read contiguously)
+  static constexpr int kHb = 23;
+  float _h[kHb];
+  std::vector<cf> _hist;
+  int _pos = 0, _phase = 0;
+  cf _prev{1, 0}, _rot{1, 0}, _step{1, 0}, _dc{};
+  int _renorm = 0;
+  std::vector<float> _dbuf;
+  Decoder *_dec;
+};
+
+}  // namespace kp
