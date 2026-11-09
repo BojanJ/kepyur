@@ -3,7 +3,7 @@
     <uses-feature android:name="android.hardware.usb.host" android:required="true" />
 
     <application
-        android:label="kepyur"
+        android:label="Kepyur"
         android:icon="@mipmap/ic_launcher"
         android:theme="@style/Theme.Kepyur">
         <activity
