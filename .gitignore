@@ -1,0 +1,6 @@
+.superpowers/
+build/
+*.cs16
+.gradle/
+local.properties
+.cxx/
