@@ -3,7 +3,7 @@
 Android analog FPV receiver for spectating. A TP-Link Archer T4U v3 (RTL8812BU) plugged into the phone
 streams 40 MS/s raw IQ through [wifi-sdr](https://github.com/snokvist/wifi-sdr) (fork:
 `gilankpam/wifi-sdr`, branch `kepyur-android`) and [devourer](https://github.com/OpenIPC/devourer); kepyur
-scans the 5.8 GHz bands for analog video, lists the pilots, and decodes the picked one in black and white.
+scans the 5.8 GHz bands for analog video, lists the pilots, and decodes the picked one in colour (NTSC and PAL; grey when the colour burst is too weak).
 Design: [docs/superpowers/specs/2026-11-09-kepyur-design.md](docs/superpowers/specs/2026-11-09-kepyur-design.md).
 
 Status: first build, not yet run on a phone. Target: vivo X200 Pro.
@@ -47,9 +47,9 @@ scripts/phone.sh logs NAME  # pull kepyur.log + logcat
 ```sh
 build/desktop/kp_replay ../vtx-spike/rec/demo.cs16            # lock numbers
 build/desktop/kp_replay ../vtx-spike/rec/r4.cs16 --cnr 8      # with noise added (CNR in an 18 MHz channel)
-build/desktop/kp_replay ../vtx-spike/rec/r4.cs16 --frames | ffplay -f rawvideo -pixel_format gray -video_size 720x480 -i -
+build/desktop/kp_replay ../vtx-spike/rec/r4.cs16 --frames | ffplay -f rawvideo -pixel_format rgb0 -video_size 720x480 -i -
 KP_SIM_FILE=../vtx-spike/rec/r4.cs16 build/desktop/kp_sim --scan   # scan -> watch without hardware
-build/desktop/kp_live --scan --frames | ffplay -f rawvideo -pixel_format gray -video_size 720x480 -framerate 60 -fflags nobuffer -i -
+build/desktop/kp_live --scan --frames | ffplay -f rawvideo -pixel_format rgb0 -video_size 720x480 -framerate 60 -fflags nobuffer -i -
 ```
 
 Measured on the spike's recordings (R4 NTSC VTX on the bench): 96.5 % of lines locked, no lock losses

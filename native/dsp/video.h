@@ -25,7 +25,7 @@ struct VideoStd {
 };
 extern const VideoStd kNtsc, kPal;
 
-// A finished picture. Valid only during the callback.
+// A finished picture, 4 bytes per pixel (R, G, B, 0xff). Valid only during the callback.
 struct Frame {
   const uint8_t *data;
   int width, height;  // 720 x 480 (NTSC) / 720 x 576 (PAL)
@@ -42,6 +42,8 @@ struct DecoderStats {
   uint64_t rephases = 0;                  // line grid moved onto a jumped signal without re-acquiring
   double line_us = 0;                     // tracked line period
   float lock_recent = 0;                  // locked fraction over the last ~2 fields
+  bool colour = false;                    // colour is being decoded (burst present and steady)
+  float burst_err = 0;                    // mean burst phase error (rad)
   const char *std_name = "?";
 };
 
@@ -50,6 +52,7 @@ struct DecoderOpts {
   bool fields = true;          // true: every field, line-doubled (60/50 Hz, no combing); false: woven frames
   int std_force = 0;           // 0 auto, 1 NTSC, 2 PAL
   bool force_invert = false;   // only try sync at the high-frequency end
+  bool colour = true;          // decode colour (falls back to grey when there is no usable burst)
 };
 
 class Decoder;

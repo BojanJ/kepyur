@@ -249,8 +249,11 @@ void Radio::dsp_loop() {
           std::lock_guard<std::mutex> l(_m);
           hz = _watch_hz;
         }
-        KP_LOGI("radio: watch %.3f MHz", hz / 1e6);
-        tune(hz, 1);
+        // Watch at 20 MS/s (20 MHz channel, ~18.4 MHz filter): the video fits (measured: same lock and colour
+        // as 40 MS/s on the spike's R4 recording and the 10 MHz-deviation PAL simulation), and on the X200 Pro
+        // 40 MS/s plus the decoder missed the chip's bank deadline every 1-2 s (185 us budget, 20 MS/s: 2x slack).
+        KP_LOGI("radio: watch %.3f MHz at 20 MS/s", hz / 1e6);
+        tune(hz, 2);
       } else if (mode == Mode::Scan) {
         _plan = scan_plan();
         _step = 0;
@@ -292,9 +295,10 @@ void Radio::dsp_loop() {
       _load_t0_ms = t;
       if (++_status_ticks % 5 == 0 && _mode == Mode::Watch)
         KP_LOGI("status: watch %.1f MHz, cpu demod %.0f%% decode %.0f%%, dropped usb %llu decode %llu, restarts %llu, "
-                "%s lock %.2f fps %.0f, acq %llu lost %llu rephase %llu", _watch_hz / 1e6, _load * 100, _dload * 100,
+                "%s %s lock %.2f fps %.0f, acq %llu lost %llu rephase %llu", _watch_hz / 1e6, _load * 100, _dload * 100,
                 (unsigned long long)_dropped.load(), (unsigned long long)_ddropped.load(),
-                (unsigned long long)(_rx ? _rx->status().restarts : 0), _vstats.std_name, _vstats.lock_recent, _fps,
+                (unsigned long long)(_rx ? _rx->status().restarts : 0), _vstats.std_name,
+                _vstats.colour ? "colour" : "grey", _vstats.lock_recent, _fps,
                 (unsigned long long)_vstats.acquisitions, (unsigned long long)_vstats.losses,
                 (unsigned long long)_vstats.rephases);
     }
@@ -553,7 +557,7 @@ std::string Radio::status_json() {
   o << ",\"video\":{\"locked\":" << (!_vstats.acquiring && _vstats.lock_recent > 0.5f ? "true" : "false")
     << ",\"lock\":" << _vstats.lock_recent << ",\"std\":" << jstr(_vstats.std_name) << ",\"fps\":" << _fps
     << ",\"acquisitions\":" << _vstats.acquisitions << ",\"losses\":" << _vstats.losses
-    << ",\"rephases\":" << _vstats.rephases << "}";
+    << ",\"rephases\":" << _vstats.rephases << ",\"colour\":" << (_vstats.colour ? "true" : "false") << "}";
   o << ",\"test\":" << (_test_result.empty() ? "null" : _test_result);
   o << ",\"pilots\":[";
   const int64_t t = now_ms();

@@ -2,7 +2,7 @@
 // or .sigmf-data + .sigmf-meta) and print lock numbers. The bench for lock robustness.
 //
 //   kp_replay REC.cs16 [--offset HZ] [--start S] [--seconds S] [--cnr DB] [--frames] [--woven] [-v]
-//   kp_replay REC.cs16 --frames | ffplay -f rawvideo -pixel_format gray -video_size 720x480 -i -
+//   kp_replay REC.cs16 --frames | ffplay -f rawvideo -pixel_format rgb0 -video_size 720x480 -i -
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -22,14 +22,14 @@ using namespace kp;
 static double json_number(const std::string &txt, const char *key) {
   const auto p = txt.find(std::string("\"") + key + "\"");
   if (p == std::string::npos) return NAN;
-  const auto c = txt.find(':', p);
+  const auto c = txt.find(':', p + std::strlen(key) + 2);  // after the key (sigmf keys contain ':')
   return std::atof(txt.c_str() + c + 1);
 }
 
 int main(int argc, char **argv) {
   std::string file;
   double offset = NAN, start = 0, seconds = 0, cnr = 0, fs = 40e6, mix = 0;
-  bool frames = false, woven = false;
+  bool frames = false, woven = false, as20 = false;
   for (int i = 1; i < argc; i++) {
     const std::string k = argv[i];
     auto v = [&] { return i + 1 < argc ? argv[++i] : (std::fprintf(stderr, "missing value\n"), std::exit(2), ""); };
@@ -38,7 +38,8 @@ int main(int argc, char **argv) {
     else if (k == "--seconds") seconds = std::atof(v());
     else if (k == "--cnr") cnr = std::atof(v());
     else if (k == "--fs") fs = std::atof(v());
-    else if (k == "--mix") mix = std::atof(v());  // shift the recording by HZ (scanner edge tests)
+    else if (k == "--mix") mix = std::atof(v());
+    else if (k == "--as20") as20 = true;  // emulate the adapter at 20 MS/s: ~18.4 MHz filter, decimate by 2  // shift the recording by HZ (scanner edge tests)
     else if (k == "--frames") frames = true;
     else if (k == "--woven") woven = true;
     else if (k == "-v") set_log_debug(true);
@@ -118,13 +119,37 @@ int main(int argc, char **argv) {
   }
 
   // ---- decode ----
+  // --as20: a 63-tap low-pass at 9.2 MHz (the chip's BW20 filter is ~18.4 MHz at -3 dB), then every other
+  // sample; in place
+  std::vector<float> h20(63);
+  std::vector<cf> hist20(62, cf{});
+  for (int i = 0; i < 63; i++) {
+    const double k = i - 31, w = 0.42 - 0.5 * std::cos(2 * M_PI * i / 62) + 0.08 * std::cos(4 * M_PI * i / 62);
+    h20[i] = static_cast<float>((k == 0 ? 2 * 9.2e6 / 40e6 : std::sin(2 * M_PI * 9.2e6 / 40e6 * k) / (M_PI * k)) * w);
+  }
+  int ph20 = 0;
+  auto dec20 = [&](cf *xs, size_t n) -> size_t {
+    std::vector<cf> w(hist20);
+    w.insert(w.end(), xs, xs + n);
+    size_t o = 0;
+    for (size_t i = 62; i < w.size(); i++) {
+      if ((ph20++ & 1) == 0) {
+        cf acc{};
+        for (int t = 0; t < 63; t++) acc += w[i - t] * h20[t];
+        xs[o++] = acc;
+      }
+    }
+    hist20.assign(w.end() - 62, w.end());
+    return o;
+  };
+  const double fs_dec = as20 ? fs / 2 : fs;
   DecoderOpts o;
   o.fields = !woven;
   int fw = 0, fh = 0;
-  FrontEnd fe(fs, offset, [&](const Frame &fr) {
+  FrontEnd fe(fs_dec, offset, [&](const Frame &fr) {
     fw = fr.width;
     fh = fr.height;
-    if (frames) std::fwrite(fr.data, 1, static_cast<size_t>(fr.width) * fr.height, stdout);
+    if (frames) std::fwrite(fr.data, 1, static_cast<size_t>(fr.width) * fr.height * 4, stdout);
   }, o);
   std::mt19937 rng(1);
   std::normal_distribution<float> nd(0.f, 1.f);
@@ -151,7 +176,9 @@ int main(int argc, char **argv) {
     if (noise_sd > 0)
       for (size_t i = 0; i < n; i++) x[i] += cf(noise_sd * nd(rng), noise_sd * nd(rng));
     const auto ta = std::chrono::steady_clock::now();
-    fe.demod(x.data(), n, dbuf);
+    size_t nn = n;
+    if (as20) nn = dec20(x.data(), n);
+    fe.demod(x.data(), nn, dbuf);
     const auto tb = std::chrono::steady_clock::now();
     fe.decode(dbuf.data(), dbuf.size());
     t_demod += std::chrono::duration<double>(tb - ta).count();
@@ -160,10 +187,11 @@ int main(int argc, char **argv) {
     if (done >= next_report) {
       next_report += static_cast<size_t>(fs);
       const auto s = fe.stats();
-      std::fprintf(stderr, "t=%5.1fs %s %s lock(recent) %.2f lines %llu/%llu fields %llu frames +%llu acq %llu lost %llu tip %.2f blank %.2f\n",
+      std::fprintf(stderr, "t=%5.1fs %s %s lock(recent) %.2f lines %llu/%llu fields %llu frames +%llu acq %llu lost %llu tip %.2f blank %.2f colour %s (burst err %.2f)\n",
                    done / fs, s.acquiring ? "ACQ " : "LOCK", s.std_name, s.lock_recent, (unsigned long long)s.lines_locked,
                    (unsigned long long)s.lines, (unsigned long long)s.fields, (unsigned long long)(s.frames - last_frames),
-                   (unsigned long long)s.acquisitions, (unsigned long long)s.losses, s.tip, s.blank);
+                   (unsigned long long)s.acquisitions, (unsigned long long)s.losses, s.tip, s.blank,
+                   s.colour ? "on" : "off", s.burst_err);
       last_frames = s.frames;
     }
   }

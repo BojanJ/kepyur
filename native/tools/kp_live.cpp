@@ -2,7 +2,7 @@
 //   kp_live --scan [--frames]               scan, then watch the strongest pilot
 //   kp_live --watch 5769 [--frames]         watch one frequency (MHz)
 //   kp_live --test 1 60                     stream test: rate_sel (1 = 40 MS/s, 2 = 20 MS/s), seconds
-//   ... --frames | ffplay -f rawvideo -pixel_format gray -video_size 720x480 -framerate 60 -fflags nobuffer -i -
+//   ... --frames | ffplay -f rawvideo -pixel_format rgb0 -video_size 720x480 -framerate 60 -fflags nobuffer -i -
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -36,7 +36,7 @@ int main(int argc, char **argv) {
   std::signal(SIGPIPE, [](int) { g_stop = true; });
   Radio radio([&](const Frame &f) {
     if (frames) {
-      std::fwrite(f.data, 1, static_cast<size_t>(f.width) * f.height, stdout);
+      std::fwrite(f.data, 1, static_cast<size_t>(f.width) * f.height * 4, stdout);
       std::fflush(stdout);
     }
   });

@@ -39,6 +39,15 @@ struct Biquad {  // RBJ low-pass
     a1 = static_cast<float>(-2 * c / a0);
     a2 = static_cast<float>((1 - al) / a0);
   }
+  void notch(double fc, double fs, double q) {
+    const double w = 2 * M_PI * fc / fs, c = std::cos(w), al = std::sin(w) / (2 * q);
+    const double a0 = 1 + al;
+    b0 = static_cast<float>(1 / a0);
+    b1 = static_cast<float>(-2 * c / a0);
+    b2 = b0;
+    a1 = b1;
+    a2 = static_cast<float>((1 - al) / a0);
+  }
   inline float run(float x) {
     const float y = b0 * x + z1;
     z1 = b1 * x - a1 * y + z2;
@@ -54,7 +63,11 @@ class Decoder {
 public:
   Decoder(double fs, FrameSink sink, const DecoderOpts &o) : fs(fs), sink(std::move(sink)), o(o) {
     luma_ring.assign(8192, 0);
+    chroma_ring.assign(8192, cf{});
     ring_mask = 8191;
+    // chroma: mixed down by the subcarrier, 4th-order Butterworth low-pass at 1.2 MHz (U/V bandwidth)
+    for (Biquad *b : {&cl_r1, &cl_i1}) b->design(1.2e6, fs, 0.54);
+    for (Biquad *b : {&cl_r2, &cl_i2}) b->design(1.2e6, fs, 1.31);
     lp_luma.design(3.0e6, fs, 0.54);
     lp_luma2.design(3.0e6, fs, 1.31);
     lp_sync.design(1.0e6, fs);
@@ -79,6 +92,8 @@ public:
     s.lock_recent = recent_n ? static_cast<float>(recent_locked) / recent_n : 0.f;
     s.std_name = std_->name;
     s.rephases = rephases;
+    s.colour = colour_on;
+    s.burst_err = c_err;
     return s;
   }
 
@@ -88,7 +103,14 @@ public:
     const float m = std::max(std::min(med_a, med_b), std::min(std::max(med_a, med_b), s));
     med_b = med_a;
     med_a = s;
-    luma_ring[n & ring_mask] = lp_luma2.run(lp_luma.run(d));
+    luma_ring[n & ring_mask] = luma_notch.run(lp_luma2.run(lp_luma.run(d)));
+    if (o.colour) {
+      // the oscillator's phase belongs to the absolute sample index: burst and picture share it
+      const cf c = d * std::conj(lo);
+      lo *= lo_step;
+      if ((n & 4095) == 0) lo /= std::abs(lo);
+      chroma_ring[n & ring_mask] = cf(cl_r2.run(cl_r1.run(c.real())), cl_i2.run(cl_i1.run(c.imag())));
+    }
     const uint64_t now = n++;
     if (acquiring) {
       if (acq_n < acq.size())
@@ -138,7 +160,19 @@ private:
   float sign = +1, tip = -1, blank = 0, thr = -0.5f;
   uint64_t n = 0;
   std::vector<float> luma_ring;
+  std::vector<cf> chroma_ring;  // chroma at baseband (U/V before the burst rotation)
   size_t ring_mask;
+  // kepyur: colour. A free-running oscillator at the nominal subcarrier mixes chroma to baseband; a
+  // per-line PLL on the burst tracks the transmitter's subcarrier phase (and its small frequency error);
+  // PAL: the burst's +-45 degree swing gives the V switch, and adjacent lines are averaged (PAL-D).
+  Biquad luma_notch, cl_r1, cl_r2, cl_i1, cl_i2;
+  cf lo{1, 0}, lo_step{1, 0};
+  double c_phase = 0, c_dphi = 0;  // burst reference phase (rad) and its drift per line
+  int64_t c_last_line = -1;
+  float c_mag = 0, c_err = 1;      // burst amplitude (MHz), mean |phase error| (rad)
+  bool colour_on = false;
+  int c_good = 0;
+  std::vector<cf> prev_uv;         // PAL-D: the previous line's U/V
   float med_a = 0, med_b = 0;
   Biquad lp_luma, lp_luma2, lp_sync;
   bool low = false, longrun = false;
@@ -179,9 +213,17 @@ private:
   void set_std(const VideoStd &s) {
     std_ = &s;
     T = s.T_us * 1e-6 * fs;
-    fieldA.assign(static_cast<size_t>(o.width) * s.active, 16);
+    fieldA.assign(static_cast<size_t>(o.width) * s.active * 4, 0);
     fieldB = fieldA;
-    frame.assign(static_cast<size_t>(o.width) * s.active * 2, 16);
+    frame.assign(static_cast<size_t>(o.width) * s.active * 2 * 4, 0);
+    const double fsc = &s == &kPal ? 4.43361875e6 : 315e6 / 88;
+    const double a = 2 * M_PI * fsc / fs;
+    lo_step = cf(static_cast<float>(std::cos(a)), static_cast<float>(std::sin(a)));
+    luma_notch.notch(fsc, fs, 1.5);  // the subcarrier out of the picture (also the B/W herringbone)
+    prev_uv.assign(o.width, cf{});
+    colour_on = false;
+    c_good = 0;
+    c_last_line = -1;
   }
 
   void count_line(bool locked) {
@@ -367,27 +409,94 @@ private:
     acq_n = 0;
   }
 
+  // Burst: chroma over the burst window (NTSC 5.3-7.8 us, PAL 5.6-7.85 us after the hsync edge; the
+  // chroma filter delays it ~0.35 us). Updates the reference phase; returns false when there is none.
+  bool burst(double ls, bool &pal_v) {
+    const double us = 1e-6 * fs;
+    const int64_t i0 = static_cast<int64_t>(ls + 6.0 * us), i1 = static_cast<int64_t>(ls + 7.8 * us);
+    if (i1 >= static_cast<int64_t>(n) || static_cast<int64_t>(n) - i0 > static_cast<int64_t>(ring_mask)) return false;
+    cf b{};
+    for (int64_t i = i0; i < i1; i++) b += chroma_ring[i & ring_mask];
+    b /= static_cast<float>(i1 - i0);
+    const float mag = std::abs(b);
+    const int64_t li = static_cast<int64_t>(line_idx);
+    const double pred = c_last_line < 0 ? std::arg(b) : c_phase + c_dphi * (li - c_last_line);
+    double e = std::arg(b * std::polar(1.f, static_cast<float>(-pred)));
+    pal_v = false;
+    if (std_ == &kPal) {
+      // The burst sits 45 degrees either side of the reference: at baseband a normal line's burst (135 deg
+      // in U/V) lands at -45, a V-switched line's (225 deg) at +45.
+      pal_v = e > 0;
+      e += pal_v ? -M_PI / 4 : M_PI / 4;
+    }
+    if (c_last_line < 0) {
+      c_phase = pred + e;
+      c_dphi = 0;
+    } else {
+      c_phase = pred + 0.2 * e;
+      c_dphi += 0.01 * e / std::max<int64_t>(1, li - c_last_line);
+    }
+    c_phase = std::remainder(c_phase, 2 * M_PI);
+    c_last_line = li;
+    c_mag += 0.05f * (mag - c_mag);
+    c_err += 0.05f * (static_cast<float>(std::fabs(e)) - c_err);
+    // colour killer, with hysteresis: a burst near the expected size (~1/4 of the sync depth) and steady
+    const bool ok = c_mag > 0.08f * (blank - tip) && c_err < 0.5f;
+    c_good = ok ? std::min(c_good + 1, 60) : std::max(c_good - 2, 0);
+    if (!colour_on && c_good >= 40) colour_on = true;
+    if (colour_on && c_good == 0) colour_on = false;
+    return colour_on;
+  }
+
   void render_line(double ls, bool locked_line) {
     if (cur_field < 0) return;
     const int64_t k = static_cast<int64_t>(line_idx) - field_line0 - std_->skip;
     if (k < 0 || k >= std_->active) return;
     if (locked_line) measure_levels(ls);
-    uint8_t *row = (cur_field == 0 ? fieldA : fieldB).data() + static_cast<size_t>(k) * o.width;
+    bool pal_v = false;
+    const bool col = o.colour && locked_line && burst(ls, pal_v);
+    uint32_t *row = reinterpret_cast<uint32_t *>((cur_field == 0 ? fieldA : fieldB).data()) + static_cast<size_t>(k) * o.width;
     const double a0 = std_->a0_us * 1e-6 * fs, aw = std_->aw_us * 1e-6 * fs;
     const float white = blank + 2.5f * (blank - tip);
-    const float scale = 219.f / (white - blank);
+    const float yscale = 1.f / (white - blank);
+    // chroma -> U/V in luma units: the burst is 20/92.5 (NTSC) or 0.15/0.7 (PAL) of black-to-white, and
+    // demodulated chroma comes out as -(U + jV)/2 against a burst of +1/2 (see fpv_sim.py's composite())
+    const float k_uv = 0.215f / std::max(c_mag, 1e-6f);
+    const cf rot = std::polar(1.f, static_cast<float>(-c_phase));
+    const double cdel = 0.21e-6 * fs;  // chroma filter delay minus luma filter delay
+    const bool pal = std_ == &kPal;
     for (int x = 0; x < o.width; x++) {
       const double p = ls + a0 + aw * x / o.width;
       const int64_t i0 = static_cast<int64_t>(p);
-      if (i0 + 1 >= static_cast<int64_t>(n) || static_cast<int64_t>(n) - i0 > static_cast<int64_t>(ring_mask)) {
-        row[x] = 16;
+      if (i0 + 8 >= static_cast<int64_t>(n) || static_cast<int64_t>(n) - i0 > static_cast<int64_t>(ring_mask) - 8) {
+        row[x] = 0xff000000u;
         continue;
       }
       const float f = static_cast<float>(p - i0);
       const float v0 = luma_ring[i0 & ring_mask], v1 = luma_ring[(i0 + 1) & ring_mask];
-      const float v = sign * (v0 + (v1 - v0) * f);
-      const float y = 16.f + (v - blank) * scale;
-      row[x] = static_cast<uint8_t>(std::clamp(y, 0.f, 255.f));
+      const float y = sign * (v0 + (v1 - v0) * f - sign * blank) * yscale;
+      float r = y, g = y, bl = y;
+      if (col) {
+        const double pc = p + cdel;
+        const int64_t j0 = static_cast<int64_t>(pc);
+        const float fc = static_cast<float>(pc - j0);
+        const cf c0 = chroma_ring[j0 & ring_mask], c1 = chroma_ring[(j0 + 1) & ring_mask];
+        const cf c = (c0 + (c1 - c0) * fc) * rot * k_uv;
+        float u = -c.real(), v = -c.imag();
+        if (pal) {
+          if (pal_v) v = -v;
+          const cf cur(u, v);
+          const cf avg = 0.5f * (cur + prev_uv[x]);  // PAL-D: hue errors cancel between lines
+          prev_uv[x] = cur;
+          u = avg.real();
+          v = avg.imag();
+        }
+        r = y + 1.140f * v;
+        g = y - 0.395f * u - 0.581f * v;
+        bl = y + 2.032f * u;
+      }
+      const auto q = [](float z) { return static_cast<uint32_t>(std::clamp(z * 255.f, 0.f, 255.f)); };
+      row[x] = 0xff000000u | q(bl) << 16 | q(g) << 8 | q(r);  // bytes R, G, B, X
     }
   }
 
@@ -412,7 +521,7 @@ private:
   }
 
   void emit(const std::vector<uint8_t> &a, const std::vector<uint8_t> &b) {
-    const size_t rowb = o.width;
+    const size_t rowb = static_cast<size_t>(o.width) * 4;
     for (int r = 0; r < std_->active; r++) {
       std::memcpy(frame.data() + (2 * r) * rowb, a.data() + r * rowb, rowb);
       std::memcpy(frame.data() + (2 * r + 1) * rowb, b.data() + r * rowb, rowb);

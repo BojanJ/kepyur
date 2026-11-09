@@ -64,7 +64,7 @@ public:
       std::lock_guard<std::mutex> l(_m);
       _w = f.width;
       _h = f.height;
-      _pending.assign(f.data, f.data + static_cast<size_t>(f.width) * f.height);
+      _pending.assign(f.data, f.data + static_cast<size_t>(f.width) * f.height * 4);
       _have = true;
     }
     _cv.notify_one();
@@ -72,7 +72,7 @@ public:
 
 private:
   void loop() {
-    std::vector<uint8_t> grey;
+    std::vector<uint8_t> px;  // RGBX
     int w = 0, h = 0;
     for (;;) {
       ANativeWindow *win;
@@ -80,7 +80,7 @@ private:
         std::unique_lock<std::mutex> l(_m);
         _cv.wait(l, [&] { return _have || _stop; });
         if (_stop) return;
-        grey.swap(_pending);
+        px.swap(_pending);
         w = _w;
         h = _h;
         _have = false;
@@ -96,11 +96,9 @@ private:
       ANativeWindow_Buffer buf;
       if (ANativeWindow_lock(win, &buf, nullptr) == 0) {
         const int rows = std::min(h, buf.height), cols = std::min(w, buf.width);
-        for (int y = 0; y < rows; y++) {
-          const uint8_t *s = grey.data() + static_cast<size_t>(y) * w;
-          uint32_t *d = static_cast<uint32_t *>(buf.bits) + static_cast<size_t>(y) * buf.stride;
-          for (int x = 0; x < cols; x++) d[x] = 0xff000000u | s[x] * 0x010101u;
-        }
+        for (int y = 0; y < rows; y++)
+          std::memcpy(static_cast<uint32_t *>(buf.bits) + static_cast<size_t>(y) * buf.stride,
+                      px.data() + static_cast<size_t>(y) * w * 4, static_cast<size_t>(cols) * 4);
         ANativeWindow_unlockAndPost(win);
       }
       ANativeWindow_release(win);
