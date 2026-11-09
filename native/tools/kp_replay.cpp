@@ -140,6 +140,8 @@ int main(int argc, char **argv) {
     std::fseek(f, static_cast<long>(start * fs) * 4, SEEK_SET);
     std::fprintf(stderr, "adding noise: sd %.1f per component (input power %.1f)\n", noise_sd, p);
   }
+  std::vector<float> dbuf;
+  double t_demod = 0, t_decode = 0;
   size_t done = 0, next_report = static_cast<size_t>(fs);
   uint64_t last_frames = 0;
   const auto t0 = std::chrono::steady_clock::now();
@@ -148,7 +150,12 @@ int main(int argc, char **argv) {
     if (!n) break;
     if (noise_sd > 0)
       for (size_t i = 0; i < n; i++) x[i] += cf(noise_sd * nd(rng), noise_sd * nd(rng));
-    fe.feed(x.data(), n);
+    const auto ta = std::chrono::steady_clock::now();
+    fe.demod(x.data(), n, dbuf);
+    const auto tb = std::chrono::steady_clock::now();
+    fe.decode(dbuf.data(), dbuf.size());
+    t_demod += std::chrono::duration<double>(tb - ta).count();
+    t_decode += std::chrono::duration<double>(std::chrono::steady_clock::now() - tb).count();
     done += n;
     if (done >= next_report) {
       next_report += static_cast<size_t>(fs);
@@ -167,5 +174,7 @@ int main(int argc, char **argv) {
                done / fs, dt, done / fs / dt, offset / 1e6, (unsigned long long)s.frames, fw, fh,
                (unsigned long long)s.acquisitions, (unsigned long long)s.losses,
                s.lines ? 100.0 * s.lines_locked / s.lines : 0.0);
+  std::fprintf(stderr, "cpu per second of IQ: demod %.0f ms, decode %.0f ms\n", t_demod / (done / fs) * 1e3,
+               t_decode / (done / fs) * 1e3);
   return 0;
 }

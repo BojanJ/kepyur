@@ -94,7 +94,9 @@ void Radio::open(int fd) {
   _dropped = 0;
   _stop = false;
   _rx = std::move(rx);
+  _ddropped = 0;
   _dsp = std::thread([this] { dsp_loop(); });
+  _decoder = std::thread([this] { decode_loop(); });
   _rx->start([this](const uint8_t *b, size_t n, const wsdr::BankMeta &m) {
     on_bank(b, n, m.seq, m.gen, m.fs, m.centre_hz, m.shift_hz);
   });
@@ -105,6 +107,13 @@ void Radio::close() {
   _qcv.notify_all();
   if (_rx) _rx->stop();
   if (_dsp.joinable()) _dsp.join();
+  _dqcv.notify_all();
+  if (_decoder.joinable()) _decoder.join();
+  {
+    std::lock_guard<std::mutex> l(_dqm);
+    _dq.clear();
+  }
+  _fe.reset();
   if (_rx) {
     _rx->close();
     _rx.reset();
@@ -231,7 +240,7 @@ void Radio::dsp_loop() {
     const bool fresh = epoch != _epoch_seen;
     _epoch_seen = epoch;
     if (fresh) {
-      // a mode change: set the radio up for it
+      // a mode change: set the radio up for it (a new watch builds a new decoder)
       _fe.reset();
       _fe_gen = ~0u;
       if (mode == Mode::Watch) {
@@ -281,6 +290,13 @@ void Radio::dsp_loop() {
       _load = _busy_s / ((t - _load_t0_ms) / 1000.0);
       _busy_s = 0;
       _load_t0_ms = t;
+      if (++_status_ticks % 5 == 0 && _mode == Mode::Watch)
+        KP_LOGI("status: watch %.1f MHz, cpu demod %.0f%% decode %.0f%%, dropped usb %llu decode %llu, restarts %llu, "
+                "%s lock %.2f fps %.0f, acq %llu lost %llu rephase %llu", _watch_hz / 1e6, _load * 100, _dload * 100,
+                (unsigned long long)_dropped.load(), (unsigned long long)_ddropped.load(),
+                (unsigned long long)(_rx ? _rx->status().restarts : 0), _vstats.std_name, _vstats.lock_recent, _fps,
+                (unsigned long long)_vstats.acquisitions, (unsigned long long)_vstats.losses,
+                (unsigned long long)_vstats.rephases);
     }
   }
 }
@@ -293,24 +309,80 @@ void Radio::handle_watch(Bank &b) {
   }
   // ignore banks from before the retune
   if (std::fabs(b.centre_hz + b.shift_hz - req) > 1e3) return;
-  if (!_fe || b.gen != _fe_gen) {
-    // a new stream run: (re)build the DSP chain (stream restarts are rare; the decoder re-acquires)
-    if (_fe) KP_LOGW("radio: stream restarted (gen %u), decoder restarts", b.gen);
-    _fe = std::make_unique<FrontEnd>(b.fs, b.shift_hz, _frames);
-    _fe_gen = b.gen;
-    _frames_at_last = 0;
-    _fps_t0_ms = now_ms();
+  if (!_fe || b.fs != _fe_fs || b.shift_hz != _fe_shift) {
+    _fe = std::make_shared<FrontEnd>(b.fs, b.shift_hz, _frames);
+    _fe_fs = b.fs;
+    _fe_shift = b.shift_hz;
+  } else if (b.gen != _fe_gen) {
+    // same settings: keep the decoder; it re-phases onto the restarted stream within a few lines
+    std::string why;
+    if (_rx) why = _rx->status().last_fault;
+    KP_LOGW("radio: stream restarted (gen %u, %s), decoder keeps going", b.gen, why.c_str());
   }
+  _fe_gen = b.gen;
   unpack(b, _iq);
-  _fe->feed(_iq.data(), _iq.size());
-  const int64_t t = now_ms();
-  if (t - _fps_t0_ms >= 1000) {
-    const auto s = _fe->stats();
-    std::lock_guard<std::mutex> l(_m);
-    _vstats = s;
-    _fps = static_cast<float>((s.frames - _frames_at_last) * 1000.0 / (t - _fps_t0_ms));
-    _frames_at_last = s.frames;
-    _fps_t0_ms = t;
+  std::vector<float> d;
+  {
+    std::lock_guard<std::mutex> l(_dqm);
+    if (!_dpool.empty()) {
+      d = std::move(_dpool.back());
+      _dpool.pop_back();
+    }
+  }
+  _fe->demod(_iq.data(), _iq.size(), d);
+  {
+    std::lock_guard<std::mutex> l(_dqm);
+    if (_dq.size() >= 128) {  // ~26 ms behind: drop the oldest (the decoder re-phases)
+      _dpool.push_back(std::move(_dq.front().d));
+      _dq.pop_front();
+      _ddropped++;
+    }
+    _dq.push_back(DBlock{_fe, std::move(d)});
+  }
+  _dqcv.notify_one();
+}
+
+void Radio::decode_loop() {
+  boost_thread("decode");
+  std::shared_ptr<FrontEnd> cur;
+  double busy = 0;
+  int64_t t0 = now_ms();
+  while (!_stop) {
+    DBlock blk;
+    {
+      std::unique_lock<std::mutex> l(_dqm);
+      _dqcv.wait_for(l, std::chrono::milliseconds(200), [&] { return !_dq.empty() || _stop; });
+      if (_dq.empty()) continue;
+      blk = std::move(_dq.front());
+      _dq.pop_front();
+    }
+    const auto ta = std::chrono::steady_clock::now();
+    if (blk.fe != cur) {
+      cur = blk.fe;
+      _frames_at_last = 0;
+      _fps_t0_ms = now_ms();
+    }
+    cur->decode(blk.d.data(), blk.d.size());
+    busy += std::chrono::duration<double>(std::chrono::steady_clock::now() - ta).count();
+    {
+      std::lock_guard<std::mutex> l(_dqm);
+      if (_dpool.size() < 256) _dpool.push_back(std::move(blk.d));
+    }
+    const int64_t t = now_ms();
+    if (t - _fps_t0_ms >= 1000) {
+      const auto s = cur->stats();
+      std::lock_guard<std::mutex> l(_m);
+      _vstats = s;
+      _fps = static_cast<float>((s.frames - _frames_at_last) * 1000.0 / (t - _fps_t0_ms));
+      _frames_at_last = s.frames;
+      _fps_t0_ms = t;
+    }
+    if (t - t0 >= 1000) {
+      std::lock_guard<std::mutex> l(_m);
+      _dload = busy / ((t - t0) / 1000.0);
+      busy = 0;
+      t0 = t;
+    }
   }
 }
 
@@ -475,7 +547,8 @@ std::string Radio::status_json() {
     << ",\"rx_error\":" << jstr(rs.error) << ",\"last_fault\":" << jstr(rs.last_fault)
     << ",\"mode\":\"" << modes[static_cast<int>(_mode)] << "\",\"freq_hz\":" << _req_hz
     << ",\"watch_hz\":" << _watch_hz << ",\"fs\":" << rs.fs << ",\"banks\":" << _banks.load()
-    << ",\"dropped\":" << _dropped.load() << ",\"restarts\":" << rs.restarts << ",\"dsp_load\":" << _load;
+    << ",\"dropped\":" << _dropped.load() << ",\"decode_dropped\":" << _ddropped.load()
+    << ",\"restarts\":" << rs.restarts << ",\"dsp_load\":" << _load << ",\"decode_load\":" << _dload;
   if (_mode == Mode::Scan) o << ",\"scan_step\":" << _step << ",\"scan_steps\":" << _plan.size();
   o << ",\"video\":{\"locked\":" << (!_vstats.acquiring && _vstats.lock_recent > 0.5f ? "true" : "false")
     << ",\"lock\":" << _vstats.lock_recent << ",\"std\":" << jstr(_vstats.std_name) << ",\"fps\":" << _fps

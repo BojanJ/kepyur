@@ -486,6 +486,9 @@ private:
 };
 
 // ---- front end ----------------------------------------------------------------------------------------
+// kepyur: block-wise and branch-free so the compiler vectorises it (the spike's per-sample loop used a whole
+// phone core at 40 MS/s). Per chunk of <= kTab samples: DC removal (block mean, smoothed), mix by a
+// precomputed rotation table, halfband /2 over a work array with 22 samples of history, discriminator.
 FrontEnd::FrontEnd(double fs_in, double shift_hz, FrameSink sink, const DecoderOpts &o)
     : _fs_in(fs_in), _fs_out(fs_in >= 40e6 ? fs_in / 2 : fs_in), _decimate(fs_in >= 40e6) {
   for (int i = 0; i < kHb; i++) {
@@ -493,7 +496,8 @@ FrontEnd::FrontEnd(double fs_in, double shift_hz, FrameSink sink, const DecoderO
     const double w = 0.5 - 0.5 * std::cos(2 * M_PI * (i + 0.5) / kHb);
     _h[i] = k == 0 ? 0.5f : static_cast<float>(std::sin(M_PI * k / 2) / (M_PI * k) * w);
   }
-  _hist.assign(2 * kHb, cf{});
+  _wr.assign(kHb - 1 + kTab, 0.f);
+  _wi.assign(kHb - 1 + kTab, 0.f);
   _dec = new Decoder(_fs_out, std::move(sink), o);
   set_shift(shift_hz);
 }
@@ -502,44 +506,112 @@ FrontEnd::~FrontEnd() { delete _dec; }
 
 void FrontEnd::set_shift(double s) {
   _shift = s;
-  const double a = -2 * M_PI * s / _fs_in;
-  _step = cf(static_cast<float>(std::cos(a)), static_cast<float>(std::sin(a)));
+  _tr.resize(kTab);
+  _ti.resize(kTab);
+  for (int i = 0; i < kTab; i++) {
+    const double a = -2 * M_PI * s / _fs_in * i;
+    _tr[i] = static_cast<float>(std::cos(a));
+    _ti[i] = static_cast<float>(std::sin(a));
+  }
+  const double a = -2 * M_PI * s / _fs_in * kTab;
+  _stepN = cf(static_cast<float>(std::cos(a)), static_cast<float>(std::sin(a)));
+  _rot = cf(1, 0);
 }
 
 DecoderStats FrontEnd::stats() const { return _dec->stats(); }
 
-void FrontEnd::feed(const cf *xs, size_t n) {
+namespace {
+// branch-free atan2 (same polynomial as fast_atan2) so the discriminator loop vectorises
+inline float atan2_bf(float y, float x) {
+  const float ax = std::fabs(x), ay = std::fabs(y);
+  const float mx = ax > ay ? ax : ay, mn = ax > ay ? ay : ax;
+  const float a = mn / (mx + 1e-20f);
+  const float s = a * a;
+  float r = ((-0.0464964749f * s + 0.15931422f) * s - 0.327622764f) * s * a + a;
+  r = ay > ax ? 1.57079637f - r : r;
+  r = x < 0 ? 3.14159274f - r : r;
+  return y < 0 ? -r : r;
+}
+}  // namespace
+
+void FrontEnd::demod(const cf *xs, size_t n, std::vector<float> &out) {
+  out.clear();
   const float k = static_cast<float>(_fs_out / (2 * M_PI) / 1e6);  // rad/sample -> MHz
-  for (size_t i = 0; i < n; i++) {
-    cf x = xs[i];
-    _dc += (x - _dc) * 1e-4f;
-    x -= _dc;
-    _rot *= _step;
-    if ((++_renorm & 4095) == 0) _rot /= std::abs(_rot);
-    x *= _rot;
-    cf y;
-    if (_decimate) {
-      _hist[_pos] = x;
-      _hist[_pos + kHb] = x;
-      _pos = (_pos + 1) % kHb;
-      if (++_phase < 2) continue;
-      _phase = 0;
-      const cf *p = _hist.data() + _pos;  // oldest .. newest
-      float re = 0, im = 0;
-      for (int t = 0; t < kHb; t += 2) {  // even taps (odd k are zero except the centre)
-        re += _h[t] * p[t].real();
-        im += _h[t] * p[t].imag();
-      }
-      re += 0.5f * p[kHb / 2].real();
-      im += 0.5f * p[kHb / 2].imag();
-      y = cf(re, im);
-    } else {
-      y = x;
+  constexpr int H = kHb - 1;
+  while (n > 0) {
+    const int m = static_cast<int>(std::min<size_t>(n, kTab));
+    // DC: block mean, smoothed across blocks (the adapter's DC line)
+    float sr = 0, si = 0;
+    for (int i = 0; i < m; i++) {
+      sr += xs[i].real();
+      si += xs[i].imag();
     }
-    const cf d = y * std::conj(_prev);
-    _prev = y;
-    _dec->push(fast_atan2(d.imag(), d.real()) * k);
+    _dc += (cf(sr / m, si / m) - _dc) * 0.3f;
+    const float dr = _dc.real(), di = _dc.imag();
+    const float pr = _rot.real(), pi = _rot.imag();
+    float *wr = _wr.data() + H, *wi = _wi.data() + H;
+    const float *tr = _tr.data(), *ti = _ti.data();
+    for (int i = 0; i < m; i++) {
+      const float xr = xs[i].real() - dr, xi = xs[i].imag() - di;
+      const float cr = pr * tr[i] - pi * ti[i], ci = pr * ti[i] + pi * tr[i];  // rot * step^i
+      wr[i] = xr * cr - xi * ci;
+      wi[i] = xr * ci + xi * cr;
+    }
+    _rot *= _stepN;
+    if (m < kTab) {  // a short chunk: the next one starts at step^m, not step^kTab
+      _rot = cf(pr, pi) * cf(tr[m], ti[m]);
+    }
+    _rot /= std::abs(_rot);
+    // halfband /2 (or pass through), then the discriminator
+    const size_t o0 = out.size();
+    if (_decimate) {
+      const float *r = _wr.data(), *q = _wi.data();
+      int j0 = _phase;
+      const int nout = m - 1 - j0 >= 0 ? (m - 1 - j0) / 2 + 1 : 0;  // windows that end inside this chunk
+      _yr.resize(nout);
+      _yi.resize(nout);
+      for (int j = 0; j < nout; j++) {
+        const int s0 = j0 + 2 * j;
+        float a = 0.5f * r[s0 + kHb / 2], b = 0.5f * q[s0 + kHb / 2];
+        for (int t = 0; t < kHb; t += 2) {
+          a += _h[t] * r[s0 + t];
+          b += _h[t] * q[s0 + t];
+        }
+        _yr[j] = a;
+        _yi[j] = b;
+      }
+      _phase = j0 + 2 * nout - m;  // where the next window starts, relative to the next chunk
+      std::memmove(_wr.data(), _wr.data() + m, H * sizeof(float));
+      std::memmove(_wi.data(), _wi.data() + m, H * sizeof(float));
+    } else {
+      _yr.assign(wr, wr + m);
+      _yi.assign(wi, wi + m);
+    }
+    const int ny = static_cast<int>(_yr.size());
+    out.resize(o0 + ny);
+    float *d = out.data() + o0;
+    float lr = _prev.real(), li = _prev.imag();
+    if (ny > 0) {
+      d[0] = atan2_bf(_yi[0] * lr - _yr[0] * li, _yr[0] * lr + _yi[0] * li) * k;
+      for (int j = 1; j < ny; j++) {
+        const float re = _yr[j] * _yr[j - 1] + _yi[j] * _yi[j - 1];
+        const float im = _yi[j] * _yr[j - 1] - _yr[j] * _yi[j - 1];
+        d[j] = atan2_bf(im, re) * k;
+      }
+      _prev = cf(_yr[ny - 1], _yi[ny - 1]);
+    }
+    xs += m;
+    n -= m;
   }
+}
+
+void FrontEnd::decode(const float *d, size_t n) {
+  for (size_t i = 0; i < n; i++) _dec->push(d[i]);
+}
+
+void FrontEnd::feed(const cf *xs, size_t n) {
+  demod(xs, n, _dbuf);
+  decode(_dbuf.data(), _dbuf.size());
 }
 
 }  // namespace kp

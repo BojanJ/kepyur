@@ -61,20 +61,25 @@ public:
   ~FrontEnd();
   void set_shift(double shift_hz);  // carrier offset from the stream centre (Hz) to bring to 0
   double shift() const { return _shift; }
-  void feed(const cf *x, size_t n);
+  void feed(const cf *x, size_t n);  // demod + decode
+  // The two halves, for running them on two threads: demod() -> discriminator output (MHz at fs_demod),
+  // decode() -> frames. Each half is single-threaded.
+  void demod(const cf *x, size_t n, std::vector<float> &out);
+  void decode(const float *d, size_t n);
   DecoderStats stats() const;
   double fs_demod() const { return _fs_out; }
 
 private:
   double _fs_in, _fs_out, _shift = 0;
   bool _decimate;
-  // halfband state (23 taps; history kept twice so the taps read contiguously)
-  static constexpr int kHb = 23;
+  static constexpr int kHb = 23;   // halfband taps
+  static constexpr int kTab = 4096;  // mixer table / chunk length
   float _h[kHb];
-  std::vector<cf> _hist;
-  int _pos = 0, _phase = 0;
-  cf _prev{1, 0}, _rot{1, 0}, _step{1, 0}, _dc{};
-  int _renorm = 0;
+  std::vector<float> _tr, _ti;     // step^i, i < kTab
+  cf _stepN{1, 0}, _rot{1, 0}, _dc{}, _prev{1, 0};
+  std::vector<float> _wr, _wi;     // mixed samples with kHb-1 of history in front
+  std::vector<float> _yr, _yi;     // decimated
+  int _phase = 0;                  // start of the next halfband window in the next chunk (0 or 1)
   std::vector<float> _dbuf;
   Decoder *_dec;
 };

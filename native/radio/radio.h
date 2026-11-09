@@ -63,6 +63,7 @@ private:
     double fs, centre_hz, shift_hz;
   };
   void dsp_loop();
+  void decode_loop();
   void on_bank(const uint8_t *b, size_t n, uint64_t seq, uint32_t gen, double fs, double centre, double shift);
   void tune(double hz, int rate_sel);
   void handle_watch(Bank &b);
@@ -93,10 +94,24 @@ private:
   std::thread _dsp;
   std::atomic<bool> _stop{false};
 
+  // decode thread: watch mode runs demod on the DSP thread and the video decoder here (two cores)
+  struct DBlock {
+    std::shared_ptr<FrontEnd> fe;
+    std::vector<float> d;
+  };
+  std::thread _decoder;
+  std::mutex _dqm;
+  std::condition_variable _dqcv;
+  std::deque<DBlock> _dq;
+  std::vector<std::vector<float>> _dpool;
+  std::atomic<uint64_t> _ddropped{0};
+  double _dload = 0;
+
   // DSP-thread state
   uint64_t _epoch_seen = ~0ull;
-  std::unique_ptr<FrontEnd> _fe;
+  std::shared_ptr<FrontEnd> _fe;
   uint32_t _fe_gen = ~0u;
+  double _fe_fs = 0, _fe_shift = 0;
   std::vector<cf> _iq;
   // scan
   std::vector<double> _plan;
@@ -117,6 +132,7 @@ private:
   // load
   double _busy_s = 0, _load = 0;
   int64_t _load_t0_ms = 0;
+  uint64_t _status_ticks = 0;
   // video stats for status
   DecoderStats _vstats;
   uint64_t _frames_at_last = 0;
