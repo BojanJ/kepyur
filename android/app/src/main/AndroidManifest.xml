@@ -4,7 +4,7 @@
 
     <application
         android:label="kepyur"
-        android:icon="@android:drawable/presence_video_online"
+        android:icon="@mipmap/ic_launcher"
         android:theme="@style/Theme.Kepyur">
         <activity
             android:name=".MainActivity"
