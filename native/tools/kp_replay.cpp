@@ -28,7 +28,7 @@ static double json_number(const std::string &txt, const char *key) {
 
 int main(int argc, char **argv) {
   std::string file;
-  double offset = NAN, start = 0, seconds = 0, cnr = 0, fs = 40e6;
+  double offset = NAN, start = 0, seconds = 0, cnr = 0, fs = 40e6, mix = 0;
   bool frames = false, woven = false;
   for (int i = 1; i < argc; i++) {
     const std::string k = argv[i];
@@ -38,6 +38,7 @@ int main(int argc, char **argv) {
     else if (k == "--seconds") seconds = std::atof(v());
     else if (k == "--cnr") cnr = std::atof(v());
     else if (k == "--fs") fs = std::atof(v());
+    else if (k == "--mix") mix = std::atof(v());  // shift the recording by HZ (scanner edge tests)
     else if (k == "--frames") frames = true;
     else if (k == "--woven") woven = true;
     else if (k == "-v") set_log_debug(true);
@@ -74,9 +75,15 @@ int main(int argc, char **argv) {
 
   std::vector<int16_t> raw(2 * 65536);
   std::vector<cf> x(65536);
+  double mix_ph = 0;
   auto read_block = [&](size_t want) -> size_t {
     const size_t n = std::fread(raw.data(), 4, std::min<size_t>(want, 65536), f);
     for (size_t i = 0; i < n; i++) x[i] = cf(raw[2 * i] / 16.f, raw[2 * i + 1] / 16.f);
+    if (mix != 0)
+      for (size_t i = 0; i < n; i++) {
+        x[i] *= cf(static_cast<float>(std::cos(mix_ph)), static_cast<float>(std::sin(mix_ph)));
+        mix_ph = std::fmod(mix_ph + 2 * M_PI * mix / fs, 2 * M_PI);
+      }
     return n;
   };
 
@@ -96,7 +103,7 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "scan: %zu hump(s) in +-%.0f MHz around %.1f MHz\n", humps.size(), 0.42 * fs / 1e6, centre / 1e6);
     for (const auto &h : humps) {
       const auto vc = check_video(buf.data(), buf.size(), fs, h.offset_hz);
-      const double mhz = (centre + h.offset_hz) / 1e6;
+      const double mhz = (centre + h.offset_hz - mix) / 1e6;  // --mix moves the signal, not the centre
       const auto *ch = nearest_channel(mhz);
       std::fprintf(stderr, "  %+.2f MHz (%.1f MHz %s) width %.1f MHz snr %.1f dB -> %s %s lock %.2f dev %.1f MHz\n",
                    h.offset_hz / 1e6, mhz, ch ? ch->name : "--", h.width_hz / 1e6, h.snr_db,

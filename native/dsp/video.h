@@ -39,6 +39,7 @@ struct DecoderStats {
   uint64_t lines = 0, lines_locked = 0;   // since the last acquisition
   uint64_t fields = 0, frames = 0;        // since construction
   uint64_t acquisitions = 0, losses = 0;  // successful acquisitions, lock losses
+  uint64_t rephases = 0;                  // line grid moved onto a jumped signal without re-acquiring
   double line_us = 0;                     // tracked line period
   float lock_recent = 0;                  // locked fraction over the last ~2 fields
   const char *std_name = "?";

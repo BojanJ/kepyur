@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- TP-Link Archer T4U v3 (RTL8812BU) -->
+    <usb-device vendor-id="9047" product-id="277" />
+    <!-- Realtek RTL8812BU -->
+    <usb-device vendor-id="3034" product-id="47122" />
+</resources>

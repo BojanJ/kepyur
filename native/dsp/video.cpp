@@ -78,6 +78,7 @@ public:
     s.line_us = T / fs * 1e6;
     s.lock_recent = recent_n ? static_cast<float>(recent_locked) / recent_n : 0.f;
     s.std_name = std_->name;
+    s.rephases = rephases;
     return s;
   }
 
@@ -121,6 +122,7 @@ public:
     // freewheel: line overdue by > 8 % with no edge
     if (line_start >= 0 && now > line_start + T * 1.08) {
       const double ls = line_start;
+      miss_run++;
       count_line(false);
       render_line(ls, false);
       close_line(ls + T);
@@ -163,6 +165,12 @@ private:
   // measured on locked active lines and smoothed over ~64 lines. Picture content cannot move them (the
   // spike's histogram peaks could, and the threshold wandered with the scene).
   uint64_t gated_lines = 0;
+  // kepyur: re-phase instead of re-acquire. After a jump in the signal (stream restart, a dropped bank)
+  // the hsyncs keep coming, one line apart, but outside the PLL's window. A run of them on a steady grid
+  // while the PLL freewheels moves the line grid onto them within a few lines.
+  int miss_run = 0, stray_run = 0;
+  double last_stray = -1;
+  uint64_t rephases = 0;
   // kepyur: lock quality over a sliding window of lines (the spike counted since acquisition)
   static constexpr int kRecent = 1024;
   uint8_t recent[kRecent] = {};
@@ -207,6 +215,8 @@ private:
     recent_n = recent_locked = recent_pos = 0;
     line_start = -1;
     gated_lines = 0;
+    miss_run = stray_run = 0;
+    last_stray = -1;
   }
 
   void track_levels(float m) {
@@ -451,12 +461,27 @@ private:
     if (std::fabs(edge - pred) <= 0.08 * T) {
       const double ns = 0.6 * edge + 0.4 * pred;
       T = 0.995 * T + 0.005 * (ns - line_start);
+      miss_run = 0;
+      stray_run = 0;
       count_line(true);
       render_line(line_start, true);
       close_line(ns);
       check_lost();
+      return;
     }
-    // an edge elsewhere (inside the line) is ignored; freewheel handles misses
+    // an hsync-width pulse off the grid: noise, an equalising pulse, or the picture has jumped
+    if (last_stray >= 0 && std::fabs(edge - last_stray - T) < 0.03 * T) stray_run++;
+    else stray_run = 1;
+    last_stray = edge;
+    if (stray_run >= 6 && miss_run >= 4) {
+      rephases++;
+      KP_LOGD("video: re-phased the line grid by %.1f us", (edge - line_start) / fs * 1e6);
+      line_start = edge;
+      line_low = 0;
+      line_has_longrun = false;
+      stray_run = 0;
+      miss_run = 0;
+    }
   }
 };
 

@@ -47,6 +47,13 @@ if(NOT ANDROID)
     add_executable(kp_live tools/kp_live.cpp)
     target_link_libraries(kp_live PRIVATE kepyur_radio Threads::Threads)
     target_compile_options(kp_live PRIVATE -O2 -Wall)
+    # kp_live with a simulated receiver that plays a recording back as a tunable adapter (KP_SIM_FILE):
+    # the scan -> pick -> watch flow end to end without hardware. sim_receiver.o supplies every
+    # wsdr::Receiver symbol, so the archive's receiver.o is never pulled in.
+    add_executable(kp_sim tools/kp_live.cpp radio/radio.cpp tools/sim_receiver.cpp)
+    target_include_directories(kp_sim PRIVATE radio)
+    target_link_libraries(kp_sim PRIVATE kepyur_dsp wsdrcore Threads::Threads)
+    target_compile_options(kp_sim PRIVATE -O2 -Wall)
   endif()
 endif()
 
