@@ -12,6 +12,14 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PKG=com.kepyur.app
 APP_LOG=/sdcard/Android/data/$PKG/files/kepyur.log
 
+# Wireless debugging often lists the phone twice (mDNS name + ip:port): pick one unless ANDROID_SERIAL says
+if [ -z "${ANDROID_SERIAL:-}" ] && [ "${1:-}" != pair ] && [ "${1:-}" != connect ]; then
+  ANDROID_SERIAL=$(adb devices | awk 'NR > 1 && $2 == "device" { print $1 }' | grep -m1 ':' || \
+                   adb devices | awk 'NR > 1 && $2 == "device" { print $1; exit }')
+  [ -n "$ANDROID_SERIAL" ] || { echo "no phone: scripts/phone.sh connect IP:PORT" >&2; exit 1; }
+  export ANDROID_SERIAL
+fi
+
 pull_logs() {
   local dir="$ROOT/logs/$(date +%Y%m%d-%H%M%S)-${1:-session}"
   mkdir -p "$dir"
