@@ -5,8 +5,6 @@ streams 40 MS/s raw IQ through [wifi-sdr](https://github.com/snokvist/wifi-sdr) 
 `gilankpam/wifi-sdr`, branch `kepyur-android`) and [devourer](https://github.com/OpenIPC/devourer); kepyur
 scans the 5.8 GHz bands for analog video, lists the pilots, and decodes the picked one in colour (NTSC and PAL; grey when the colour burst is too weak).
 
-Status: running on the target phone (vivo X200 Pro): scan finds the pilot, colour video at 60 fps.
-
 The latest APK from `main` is the rolling **main** pre-release (tag `main-latest`), rebuilt by CI
 (`.github/workflows/android.yml`) on every push to `main`. It is a debug build signed with CI's key: if a
 locally built kepyur is installed, uninstall it first (`adb uninstall com.kepyur.app`).
